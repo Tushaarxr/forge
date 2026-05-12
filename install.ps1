@@ -22,7 +22,15 @@ if (Get-Command pipx -ErrorAction SilentlyContinue) {
     if ($env:PATH -notlike "*$pythonPath*") {
         $env:PATH = "$pythonPath;$env:PATH"
         Write-Host "NOTE: Added $pythonPath to current session PATH." -ForegroundColor Gray
-        Write-Host "WARNING: You may still need to add this to your permanent System PATH to run 'forge' in new windows." -ForegroundColor Yellow
+        
+        # Permanently add to User PATH
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if ($userPath -notlike "*$pythonPath*") {
+            $newUserPath = "$pythonPath;$userPath"
+            [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+            Write-Host "SUCCESS: Permanently added $pythonPath to your System PATH!" -ForegroundColor Green
+            Write-Host "You will be able to run 'forge' in all future terminal windows." -ForegroundColor Green
+        }
     }
 }
 
