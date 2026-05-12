@@ -12,14 +12,17 @@ try {
 if (Get-Command pipx -ErrorAction SilentlyContinue) {
     pipx install forge-agent
 } else {
-    Write-Host "pipx not found, installing with pip..." -ForegroundColor Yellow
-    pip install forge-agent
+    Write-Host "pipx not found, installing with python -m pip..." -ForegroundColor Yellow
+    python -m pip install forge-agent
     
-    # Check if pip's script directory is in PATH
+    # Calculate pip's script directory
     $pythonPath = python -c "import sys; import os; print(os.path.join(sys.prefix, 'Scripts') if os.name == 'nt' else os.path.join(os.path.expanduser('~'), '.local', 'bin'))"
+    
+    # Add to current session PATH so they can run it immediately
     if ($env:PATH -notlike "*$pythonPath*") {
-        Write-Host "WARNING: The installation directory ($pythonPath) is NOT in your PATH." -ForegroundColor Yellow
-        Write-Host "You may need to restart your terminal or add it manually to run 'forge'." -ForegroundColor Yellow
+        $env:PATH = "$pythonPath;$env:PATH"
+        Write-Host "NOTE: Added $pythonPath to current session PATH." -ForegroundColor Gray
+        Write-Host "WARNING: You may still need to add this to your permanent System PATH to run 'forge' in new windows." -ForegroundColor Yellow
     }
 }
 

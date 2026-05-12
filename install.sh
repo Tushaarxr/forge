@@ -13,8 +13,8 @@ python3 -c "import sys; assert sys.version_info >= (3,10)" 2>/dev/null || {
 if command -v pipx &> /dev/null; then
   pipx install forge-agent
 else
-  echo "pipx not found, installing with pip..."
-  pip install forge-agent
+  echo "pipx not found, installing with python3 -m pip..."
+  python3 -m pip install forge-agent
 fi
 
 echo ""
