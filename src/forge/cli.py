@@ -133,7 +133,7 @@ def setup_command(reset: bool = False, key: bool = False) -> None:
 
     if not key:
         console.print(Panel("""[bold cyan]╭──────────────────────────────────────────╮
-│  🔨 forge — Local Coding Agent v0.2.0   │
+│  🔨 forge — Local Coding Agent v0.2.1   │
 │  First-time setup wizard                 │
 ╰──────────────────────────────────────────╯[/bold cyan]""", border_style="cyan"))
 
@@ -196,7 +196,7 @@ def setup_command(reset: bool = False, key: bool = False) -> None:
 
     config["lm_studio_url"] = "http://localhost:1234"
     config["setup_complete"] = True
-    config["version"] = "0.2.0"
+    config["version"] = "0.2.1"
     
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     console.print(f"\n[green]✓ Global config saved to {config_path}[/green]")

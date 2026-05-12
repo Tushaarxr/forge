@@ -313,10 +313,10 @@ All five checked? You are ready to install forge.
 curl -fsSL https://raw.githubusercontent.com/Tushaarxr/forge/main/install.sh | bash
 
 # Or with pipx directly
-pipx install git+https://github.com/Tushaarxr/forge.git
+pipx install forge-coder
 
 # Or with pip
-pip install git+https://github.com/Tushaarxr/forge.git
+pip install forge-coder
 
 # Or with Docker (no Python install needed)
 docker run -it \

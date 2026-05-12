@@ -10,10 +10,10 @@ try {
 
 # Prefer pipx if available, fall back to pip
 if (Get-Command pipx -ErrorAction SilentlyContinue) {
-    pipx install git+https://github.com/Tushaarxr/forge.git
+    pipx install forge-coder
 } else {
     Write-Host "pipx not found, installing with python -m pip..." -ForegroundColor Yellow
-    python -m pip install git+https://github.com/Tushaarxr/forge.git
+    python -m pip install forge-coder
     
     # Calculate pip's script directory
     $pythonPath = python -c "import sys; import os; print(os.path.join(sys.prefix, 'Scripts') if os.name == 'nt' else os.path.join(os.path.expanduser('~'), '.local', 'bin'))"
