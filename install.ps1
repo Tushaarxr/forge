@@ -10,10 +10,10 @@ try {
 
 # Prefer pipx if available, fall back to pip
 if (Get-Command pipx -ErrorAction SilentlyContinue) {
-    pipx install forge-agent
+    pipx install git+https://github.com/Tushaarxr/forge.git
 } else {
     Write-Host "pipx not found, installing with python -m pip..." -ForegroundColor Yellow
-    python -m pip install forge-agent
+    python -m pip install git+https://github.com/Tushaarxr/forge.git
     
     # Calculate pip's script directory
     $pythonPath = python -c "import sys; import os; print(os.path.join(sys.prefix, 'Scripts') if os.name == 'nt' else os.path.join(os.path.expanduser('~'), '.local', 'bin'))"

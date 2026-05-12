@@ -16,7 +16,7 @@ irm https://raw.githubusercontent.com/Tushaarxr/forge/main/install.ps1 | iex
 
 **Or with pipx**
 ```bash
-pipx install forge-agent
+pipx install git+https://github.com/Tushaarxr/forge.git
 ```
 
 **Or with Docker**
