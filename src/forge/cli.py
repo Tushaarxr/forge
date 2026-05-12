@@ -132,11 +132,14 @@ def setup_command(reset: bool = False, key: bool = False) -> None:
             pass
 
     if not key:
-        console.print(Panel("[bold cyan]╭──────────────────────────────────────────╮\\n│  🔨 forge — Local Coding Agent v0.2.0   │\\n│  First-time setup wizard                 │\\n╰──────────────────────────────────────────╯[/bold cyan]", border_style="cyan"))
+        console.print(Panel("""[bold cyan]╭──────────────────────────────────────────╮
+│  🔨 forge — Local Coding Agent v0.2.0   │
+│  First-time setup wizard                 │
+╰──────────────────────────────────────────╯[/bold cyan]""", border_style="cyan"))
 
     # LM Studio Check
     if not key:
-        console.print("\\n[bold]Checking LM Studio...[/bold]")
+        console.print("\n[bold]Checking LM Studio...[/bold]")
         lm_url = os.getenv("LM_STUDIO_BASE_URL", "http://localhost:1234")
         try:
             resp = httpx.get(f"{lm_url}/v1/models", timeout=2.0)
@@ -144,8 +147,8 @@ def setup_command(reset: bool = False, key: bool = False) -> None:
                 models = [m.get("id") for m in resp.json().get("data", [])]
                 console.print(f"[green]✓ LM Studio detected at {lm_url}[/green]")
                 if models:
-                    model_choices = "\\n".join([f"  [{i+1}] {m}" for i, m in enumerate(models)])
-                    console.print("Loaded models:\\n" + model_choices)
+                    model_choices = "\n".join([f"  [{i+1}] {m}" for i, m in enumerate(models)])
+                    console.print("Loaded models:\n" + model_choices)
                     choice = Prompt.ask("Select your coding model (enter number or name)", default=models[0])
                     if choice.isdigit() and 1 <= int(choice) <= len(models):
                         config["local_model"] = models[int(choice)-1]
@@ -171,7 +174,7 @@ def setup_command(reset: bool = False, key: bool = False) -> None:
         if Confirm.ask("Test this key?", default=True):
             pass # Skipping real test for brevity, assuming valid
     else:
-        console.print("\\n[bold]Gemini API Key[/bold]")
+        console.print("\n[bold]Gemini API Key[/bold]")
         console.print("Get your free Gemini API key at: https://aistudio.google.com")
         console.print("  1. Sign in with Google")
         console.print("  2. Click 'Get API key' → 'Create API key'")
@@ -180,7 +183,7 @@ def setup_command(reset: bool = False, key: bool = False) -> None:
         config["gemini_api_key"] = api_key
 
     if not key:
-        console.print("\\n[bold]Which Gemini model for planning? (free tier recommended)[/bold]")
+        console.print("\n[bold]Which Gemini model for planning? (free tier recommended)[/bold]")
         console.print("  [1] gemini-2.0-flash     — Fast, free, 1500 req/day")
         console.print("  [2] gemini-2.5-flash     — Smarter planning, free tier")
         console.print("  [3] gemini-2.5-pro       — Best quality, limited free quota")
@@ -196,11 +199,11 @@ def setup_command(reset: bool = False, key: bool = False) -> None:
     config["version"] = "0.2.0"
     
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    console.print(f"\\n[green]✓ Global config saved to {config_path}[/green]")
+    console.print(f"\n[green]✓ Global config saved to {config_path}[/green]")
 
     # Project init
     if not key and Path.cwd() != Path.home() and Path.cwd() != global_dir:
-        if Confirm.ask(f"\\nInitialize forge in current directory? ({Path.cwd()})", default=True):
+        if Confirm.ask(f"\nInitialize forge in current directory? ({Path.cwd()})", default=True):
             forge_dir = Path(".forge")
             forge_dir.mkdir(parents=True, exist_ok=True)
             
@@ -215,7 +218,7 @@ LOCAL_MODEL={config.get('local_model', 'qwen3.5-9b-instruct')}
             
             # gitignore
             gitignore = Path(".gitignore")
-            ignore_text = "\\n.forge/\\n*.forge_backup\\n"
+            ignore_text = "\n.forge/\n*.forge_backup\n"
             if not gitignore.exists():
                 gitignore.write_text(ignore_text, encoding="utf-8")
             elif ".forge/" not in gitignore.read_text(encoding="utf-8"):
