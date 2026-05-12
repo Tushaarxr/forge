@@ -31,3 +31,6 @@ forge = "forge.cli:forge"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
