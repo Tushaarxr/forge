@@ -1,0 +1,14 @@
+version: "3.9"
+services:
+  forge:
+    build: .
+    volumes:
+      - .:/workspace          # mounts current project into container
+      - ~/.forge:/root/.forge # mounts global config
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LOCAL_MODEL=${LOCAL_MODEL:-qwen3.5-9b-instruct}
+      - LM_STUDIO_BASE_URL=http://host.docker.internal:1234
+    working_dir: /workspace
+    stdin_open: true
+    tty: true

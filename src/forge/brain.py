@@ -215,6 +215,66 @@ class Brain:
             logger.error(f"Planning failed: {e}")
             return {"reasoning": f"Planning failed: {e}", "sub_tasks": [], "affected_files": [], "risks": []}
 
+    async def plan_full_project(
+        self,
+        goal: str,
+        project_summary: dict[str, Any] | str,
+    ) -> list[dict[str, Any]]:
+        """Generate a complete ordered task list for building a full application.
+
+        Distinct from plan() which plans a single task. This method generates
+        the entire roadmap from empty folder to working, runnable application.
+
+        Returns:
+            List of task dicts with: id, description, active_file, estimated_lines
+        """
+        system_prompt = (
+            "You are planning a COMPLETE application build, not a single task. "
+            "Generate ALL tasks required from empty folder to working, runnable application. "
+            "Order tasks by dependency: scaffolding first, then models, then business logic, "
+            "then routes/controllers, then tests, then configuration/deployment. "
+            "Each task must be: completable in a single model call, scoped to 1-2 files maximum, "
+            "under 100 lines of new code. If a feature requires 300 lines, split into 3 tasks. "
+            "Be exhaustive — a missing task means a broken application. "
+            "Aim for 15-40 tasks for a typical application. "
+            "Respond in JSON only with no markdown fences."
+        )
+
+        if isinstance(project_summary, dict):
+            summary_str = json.dumps(project_summary, indent=2)
+        else:
+            summary_str = str(project_summary)
+
+        user_prompt = (
+            f"Goal: {goal}\n\n"
+            f"Current Project State:\n{summary_str}\n\n"
+            "Generate the complete ordered task list to build this application from scratch.\n"
+            "Return JSON with a single key 'tasks' containing a list of objects, each with:\n"
+            "- id: integer (1-based)\n"
+            "- description: clear, actionable task description\n"
+            "- active_file: primary file this task creates/modifies (string or null)\n"
+            "- estimated_lines: rough estimate of new lines of code\n"
+            "- category: one of: scaffold | model | logic | route | test | config\n\n"
+            "Ensure tasks are ordered so each one builds on completed prior tasks."
+        )
+
+        try:
+            result_text = await self._call(system_prompt, user_prompt)
+            parsed = self._parse_json(result_text)
+            tasks = parsed.get("tasks", [])
+            if not tasks and isinstance(parsed, list):
+                tasks = parsed
+            # Ensure sequential IDs
+            for i, t in enumerate(tasks, 1):
+                t["id"] = i
+            return tasks
+        except httpx.HTTPStatusError as e:
+            logger.error(f"API error during full project planning ({e.response.status_code}): {e.response.text[:300]}")
+            return []
+        except Exception as e:
+            logger.error(f"Full project planning failed: {e}")
+            return []
+
     async def review(
         self,
         task: str,

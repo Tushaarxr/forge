@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from src.brain import Brain
-    from src.vector_store import VectorStore
+    from forge.brain import Brain
+    from forge.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 

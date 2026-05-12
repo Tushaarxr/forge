@@ -1,10 +1,14 @@
 # Forge artifacts
+# Ignore all internal .forge/ data except committable files
 .forge/
+!.forge/plan.json
+!.forge/CHANGELOG.md
 *.forge_backup
 config/.env
 .env
 .env.*
 forge_test/
+
 # Python
 __pycache__/
 *.py[cod]

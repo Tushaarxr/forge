@@ -9,11 +9,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.vector_store import VectorStore
-from src.project_graph import ProjectGraph
-from src.context_engine import ContextEngine
-from src.worker import Worker
-from src.feedback import FeedbackLoop
+from forge.vector_store import VectorStore
+from forge.project_graph import ProjectGraph
+from forge.context_engine import ContextEngine
+from forge.worker import Worker
+from forge.feedback import FeedbackLoop
 
 
 # ──────────────────────────────────────────────────────────────────────────────

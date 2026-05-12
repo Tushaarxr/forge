@@ -1,110 +1,61 @@
-# Forge: Local Coding Agent CLI
+# forge — Local Coding Agent
 
-Forge is a powerful, local-first coding assistant CLI designed to act as an autonomous software engineer directly in your terminal. It leverages a "Master Brain" (Gemini/Anthropic) for high-level reasoning and planning, while delegating the actual code generation to a fast, locally hosted worker model (via LM Studio).
+Local-first autonomous coding agent CLI.
 
-Forge understands your entire project context using a hybrid retrieval engine that combines:
-1. **Semantic Vector Search** (FAISS)
-2. **Project Dependency Graphs** (NetworkX)
+## Install
 
-## Prerequisites
-
-Before starting, ensure you have:
-1. Python 3.10+ installed.
-2. **LM Studio** installed and running locally on port `1234` with a model loaded (e.g., `qwen3.5-9b-instruct` or `qwen2.5-coder`).
-3. A **Gemini API Key** (for the Master Brain).
-
-## Installation
-
-1. Clone or download the repository.
-2. Create and activate a virtual environment:
-   ```bash
-   python -m venv .venv
-   
-   # Windows:
-   .venv\Scripts\activate
-   # macOS/Linux:
-   source .venv/bin/activate
-   ```
-3. Install the dependencies in editable mode:
-   ```bash
-   pip install -e ".[dev]"
-   ```
-
-## Configuration
-
-Forge uses environment variables for configuration. You can set these globally, or place a `.env` file inside your project's `.forge/` directory.
-
-Copy the provided example to get started:
+**One line (recommended)**
 ```bash
-mkdir .forge
-cp config/.env.example .forge/.env
+curl -fsSL https://raw.githubusercontent.com/Tushaarxr/forge/main/install.sh | bash
 ```
 
-**Key Environment Variables:**
-- `GEMINI_API_KEY`: Your Google Gemini API key.
-- `MASTER_MODEL`: The models to use for planning (supports comma-separated fallbacks, e.g., `gemini-2.5-flash,gemini-2.0-flash`).
-- `LM_STUDIO_BASE_URL`: URL to your local LM Studio instance (default: `http://localhost:1234`).
-- `LOCAL_MODEL`: The name of the model loaded in LM Studio.
-
-## User Manual: CLI Commands
-
-Once installed, you can use the `forge` command from anywhere within an initialized project.
-
-### 1. Initialize a Project
+**Or with pipx**
 ```bash
-forge init
+pipx install forge-agent
 ```
-**What it does:** Scans your project directory, parses your code into a dependency graph, and creates a FAISS vector index. This gives Forge its context.
-*Note: You must run this command first in any new project directory.*
 
-### 2. Check Status
+**Or with Docker**
 ```bash
-forge status
-```
-**What it does:** Displays a dashboard showing the health of your vector store, project graph, LM Studio connection, and the Master Brain API.
+docker build -t forge-agent .
+docker run -it -e GEMINI_API_KEY=AIza... -v $(pwd):/workspace forge-agent auto "build a todo app"
 
-### 3. Run a Task
+# With docker-compose
+GEMINI_API_KEY=AIza... docker-compose run forge auto "build a todo app"
+```
+
+## Quickstart (3 steps)
 ```bash
-forge run "add a divide(a, b) function to utils.py"
+forge setup         # one-time wizard: API keys + LM Studio check
+cd my-project/
+forge auto "build a FastAPI todo app with SQLite and JWT auth"
 ```
-**Options:**
-- `--file`, `-f`: Specify an active file to prioritize context for.
-- `--dry-run`: View the execution plan without actually modifying any code.
 
-**What it does:** 
-1. **Plans:** The Master Brain creates a step-by-step plan based on your goal.
-2. **Executes:** The local LM Studio worker writes the code for each step.
-3. **Reviews:** The Master Brain reviews the generated code for correctness.
-4. **Applies:** Before making changes, Forge creates a `.forge_backup` file, then prompts you to keep or reject the changes.
+## Commands
 
-### 4. Interactive Chat
+| Command | Description |
+|---|---|
+| `forge setup` | One-time setup: Configure API keys and create environment files. |
+| `forge init` | Initialize forge: index files into vector store and build dependency graph. |
+| `forge run` | Run the forge coding agent on a goal. |
+| `forge auto` | Autonomous end-to-end build mode. |
+| `forge chat` | Interactive REPL: chat with the coding agent. |
+| `forge status` | Show current project status and metrics. |
+| `forge summarise` | Create a checkpoint summary of recent changes. |
+| `forge rollback` | Rollback files to their `.forge_backup` versions. |
+
+## Requirements
+- Python 3.10+
+- LM Studio (free): https://lmstudio.ai — runs Qwen3.5-9B locally
+- Gemini API key (free): https://aistudio.google.com
+
+## Architecture
+Forge leverages a "Master Brain" (Gemini) for high-level project planning and a "Local Worker" (LM Studio / Qwen3.5) for fast, iterative code execution. It uses FAISS for vector search and NetworkX to map your project's dependency graph.
+
+## Contributing / Development setup
+
 ```bash
-forge chat
+git clone https://github.com/Tushaarxr/forge.git
+cd forge
+pip install -e ".[dev]"
+pytest tests/
 ```
-**What it does:** Opens an interactive REPL session where you can converse with Forge continuously. 
-Inside the chat, you can type goals, or use special slash commands:
-- `/status` — Show session statistics.
-- `/summarise` — View learnings from the current session.
-- `/clear` — Wipe the current session memory.
-- `/quit` — Exit the chat.
-
-### 5. Rollback Changes
-```bash
-forge rollback
-```
-**What it does:** If you realize a change made by Forge broke something, run this command. It finds all `.forge_backup` files and lets you safely revert the affected files back to their original state.
-
-### 6. Create Checkpoints
-```bash
-forge summarise
-```
-**What it does:** Summarizes recent changes made by the agent and creates a human-readable entry in `.forge/CHANGELOG.md`. This is useful for keeping track of what the AI has accomplished over multiple runs.
-
-## Typical Workflow
-
-1. **Start LM Studio**: Ensure your local worker model is running.
-2. **Navigate to your code**: `cd my_project/`
-3. **Initialize**: `forge init`
-4. **Plan a change**: `forge run "refactor the database layer" --dry-run`
-5. **Execute**: `forge run "refactor the database layer"`
-6. **Review**: Check the file diffs presented in the terminal and hit `y` to apply, or `r` to rollback!

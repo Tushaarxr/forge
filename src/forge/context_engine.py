@@ -4,8 +4,8 @@ import logging
 import time
 from typing import Any
 
-from src.vector_store import VectorStore
-from src.project_graph import ProjectGraph
+from forge.vector_store import VectorStore
+from forge.project_graph import ProjectGraph
 
 
 logger = logging.getLogger(__name__)

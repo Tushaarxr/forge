@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.forge/
+*.forge_backup
+.git/
+dist/
+*.egg-info/
