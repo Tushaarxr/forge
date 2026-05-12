@@ -4,9 +4,14 @@ Local-first autonomous coding agent CLI.
 
 ## Install
 
-**One line (recommended)**
+**One line (Linux/macOS)**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Tushaarxr/forge/main/install.sh | bash
+```
+
+**One line (Windows PowerShell)**
+```powershell
+irm https://raw.githubusercontent.com/Tushaarxr/forge/main/install.ps1 | iex
 ```
 
 **Or with pipx**
