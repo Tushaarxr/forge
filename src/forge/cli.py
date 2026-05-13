@@ -961,6 +961,23 @@ def auto_command(
         brain = Brain()
         context_engine = ContextEngine(vector_store=vector_store, graph=project_graph)
 
+        # ── Persistent memory + session logger ────────────────────────────────
+        _memory = None
+        _session_logger = None
+        try:
+            from .persistent_memory import PersistentMemory
+            from .session_logger import SessionLogger
+            _memory = PersistentMemory(str(Path.cwd()))
+            _memory.decay_scores()
+            _session_logger = SessionLogger(
+                memory_root=_memory.root,
+                goal=goal or "forge auto",
+                model=os.getenv("MASTER_MODEL", "gemini-2.0-flash"),
+                memory=_memory,
+            )
+        except Exception as _mem_err:
+            logger.warning(f"Persistent memory unavailable: {_mem_err}")
+
         runner = AutoRunner(
             brain=brain,
             worker=worker,
@@ -970,6 +987,8 @@ def auto_command(
             checkpoint_every=checkpoint_every,
             max_tasks=max_tasks,
             console=console,
+            memory=_memory,
+            session_logger=_session_logger,
         )
 
         # ── Resume check ──────────────────────────────────────────────────────
@@ -1236,6 +1255,15 @@ def auto_command(
             )
         except Exception:
             pass
+        finally:
+            # Always close the session logger — even on error or KeyboardInterrupt.
+            # This MUST live inside _run_auto because _session_logger is a local
+            # variable of this coroutine and is inaccessible from auto_command.
+            if _session_logger is not None:
+                try:
+                    _session_logger.close(summary="forge auto session ended")
+                except Exception:
+                    pass
 
     try:
         asyncio.run(_run_auto())
@@ -1244,6 +1272,238 @@ def auto_command(
     except Exception as e:
         console.print(f"[red]Fatal error:[/red] {e}")
         logger.exception("forge auto failed")
+
+    # NOTE: session logger is closed inside _run_auto() via finally block.
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# forge remember
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command(name="remember")
+@require_setup
+@click.argument("text")
+@click.option(
+    "--category", "-c",
+    default="note",
+    type=click.Choice(["requirement", "decision", "error", "code", "note"]),
+    show_default=True,
+    help="Memory category (affects decay rate and retrieval priority).",
+)
+def remember_command(text: str, category: str) -> None:
+    """Store a note in persistent memory.
+
+    \b
+    Examples:
+      forge remember "JWT with RS256, refresh tokens in Redis" --category decision
+      forge remember "users table has composite primary key" --category requirement
+      forge remember "ImportError: missing msgpack" --category error
+    """
+    if not _require_init():
+        return
+    try:
+        from .persistent_memory import PersistentMemory
+        pm = PersistentMemory(str(Path.cwd()))
+        chunk_id = pm.remember(text, category=category, source="user")
+        console.print(f"[green]✅ Stored[/green] [{category}] — id: [dim]{chunk_id[:8]}...[/dim]")
+    except Exception as e:
+        console.print(f"[red]Error storing memory:[/red] {e}")
+        logger.exception("remember command failed")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# forge recall
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command(name="recall")
+@require_setup
+@click.argument("query")
+@click.option("--top-k", "-k", default=5, type=int, show_default=True, help="Max results.")
+@click.option(
+    "--category", "-c",
+    default=None,
+    type=click.Choice(["requirement", "decision", "error", "code", "note"]),
+    help="Filter by category.",
+)
+def recall_command(query: str, top_k: int, category: str | None) -> None:
+    """Semantic search over persistent memory.
+
+    \b
+    Examples:
+      forge recall "authentication approach"
+      forge recall "database schema" --category decision --top-k 3
+    """
+    if not _require_init():
+        return
+    try:
+        from .persistent_memory import PersistentMemory
+        pm = PersistentMemory(str(Path.cwd()))
+        results = pm.recall(query, top_k=top_k, category=category)
+        if not results:
+            console.print("[yellow]No memories found.[/yellow]")
+            return
+        table = Table(title=f"🧠 Recall: '{query}'", show_header=True, header_style="bold cyan")
+        table.add_column("#", width=3, style="dim")
+        table.add_column("Category", width=12, style="yellow")
+        table.add_column("Score", width=7, justify="right", style="green")
+        table.add_column("Text", style="white")
+        for i, m in enumerate(results, 1):
+            table.add_row(
+                str(i),
+                m["category"],
+                f"{m['score']:.3f}",
+                m["text"][:120].replace("\n", " "),
+            )
+        console.print(table)
+    except Exception as e:
+        console.print(f"[red]Error recalling memory:[/red] {e}")
+        logger.exception("recall command failed")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# forge memory-status
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command(name="memory-status")
+@require_setup
+def memory_status_command() -> None:
+    """Show persistent memory statistics."""
+    if not _require_init():
+        return
+    try:
+        from .persistent_memory import PersistentMemory
+        pm = PersistentMemory(str(Path.cwd()))
+        st = pm.stats()
+
+        table = Table(title="🧠 Persistent Memory Status", show_header=False, box=None)
+        table.add_column("Metric", style="cyan", width=28)
+        table.add_column("Value", style="white", justify="right")
+
+        table.add_row("Memory entries", str(st["memories"]))
+        table.add_row("  (FAISS vectors)", str(st["index_vectors"]))
+        table.add_row("Sessions recorded", str(st["sessions"]))
+        table.add_row("Handoff packets", str(st["handoffs"]))
+
+        cats = st.get("categories", {})
+        if cats:
+            table.add_row("", "")
+            table.add_row("By category:", "")
+            for cat, cnt in sorted(cats.items()):
+                table.add_row(f"  {cat}", str(cnt))
+
+        last = st.get("last_session")
+        if last:
+            goal, started_at = last
+            import time as _time
+            days = int((_time.time() - (started_at or 0)) / 86400)
+            age = f"{days}d ago" if days > 0 else "today"
+            table.add_row("Last session", f"{age}: {(goal or '')[:40]}")
+
+        mem_path = pm.root
+        table.add_row("Storage path", str(mem_path))
+
+        console.print(table)
+    except Exception as e:
+        console.print(f"[red]Error reading memory status:[/red] {e}")
+        logger.exception("memory-status command failed")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# forge handoff
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command(name="handoff")
+@require_setup
+@click.option(
+    "--target", "-t",
+    default="any",
+    type=click.Choice(["any", "forge", "cursor", "claude-code", "anti-gravity"]),
+    show_default=True,
+    help="Target agent for the handoff packet.",
+)
+@click.option("--print-prefix", is_flag=True, help="Print prompt prefix instead of JSON.")
+def handoff_command(target: str, print_prefix: bool) -> None:
+    """Generate a cross-agent handoff packet for context transfer.
+
+    Produces a compressed context dump that any AI agent can consume
+    as a system-prompt prefix to restore full project context.
+
+    \b
+    Examples:
+      forge handoff
+      forge handoff --target claude-code
+      forge handoff --target cursor --print-prefix
+    """
+    if not _require_init():
+        return
+
+    async def _run() -> None:
+        try:
+            from .persistent_memory import PersistentMemory
+            from .brain import Brain
+            from .handoff import HandoffPacket
+
+            pm = PersistentMemory(str(Path.cwd()))
+            brain = Brain()
+            hp = HandoffPacket(memory=pm, brain=brain)
+
+            console.print(f"[dim]Generating handoff packet for target: {target}...[/dim]")
+            packet = await hp.generate(target=target)
+            gz_path = hp.save(packet)
+
+            if print_prefix:
+                prefix = hp.to_prompt_prefix(packet)
+                console.print(Panel(prefix, title="📦 Handoff Prompt Prefix", border_style="cyan"))
+            else:
+                console.print(Panel(
+                    f"[green]✅ Handoff packet generated[/green]\n"
+                    f"Saved to: [cyan]{gz_path}[/cyan]\n\n"
+                    f"Sessions: [cyan]{packet.get('sessions_summary', '')[:80]}[/cyan]\n"
+                    f"Top memories: [cyan]{len(packet.get('top_memories', []))}[/cyan]\n"
+                    f"Key decisions: [cyan]{len(packet.get('key_decisions', []))}[/cyan]\n\n"
+                    f"[dim]Use --print-prefix to get the LLM system prompt string.[/dim]",
+                    title="📦 Forge Handoff",
+                    border_style="green",
+                ))
+        except Exception as e:
+            console.print(f"[red]Error generating handoff:[/red] {e}")
+            logger.exception("handoff command failed")
+
+    try:
+        asyncio.run(_run())
+    except Exception as e:
+        console.print(f"[red]Fatal error:[/red] {e}")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# forge context
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.command(name="context")
+@require_setup
+@click.option("--sessions", "-n", default=3, type=int, show_default=True, help="Number of past sessions to include.")
+def context_command(sessions: int) -> None:
+    """Print session context string from persistent memory.
+
+    Output is suitable for injection into any LLM's system prompt.
+
+    \b
+    Example:
+      forge context --sessions 5
+    """
+    if not _require_init():
+        return
+    try:
+        from .persistent_memory import PersistentMemory
+        pm = PersistentMemory(str(Path.cwd()))
+        ctx = pm.get_session_context(last_n_sessions=sessions)
+        if ctx:
+            console.print(Panel(ctx, title="📜 Session Context", border_style="cyan"))
+        else:
+            console.print("[yellow]No session history found. Run forge auto to start recording sessions.[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Error reading context:[/red] {e}")
+        logger.exception("context command failed")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

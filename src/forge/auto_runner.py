@@ -11,7 +11,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
+
+if TYPE_CHECKING:
+    from .persistent_memory import PersistentMemory
+    from .session_logger import SessionLogger
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +207,8 @@ class AutoRunner:
         checkpoint_every: int = 5,
         max_tasks: int = 50,
         console=None,
+        memory: "PersistentMemory | None" = None,
+        session_logger: "SessionLogger | None" = None,
     ) -> None:
         self.brain = brain
         self.worker = worker
@@ -212,6 +218,8 @@ class AutoRunner:
         self.checkpoint_every = checkpoint_every
         self.max_tasks = max_tasks
         self.console = console
+        self.memory = memory
+        self.session_logger = session_logger
 
         self.plan: AutoPlan | None = None
         # Track .forge_backup files created in the current checkpoint window
@@ -424,6 +432,16 @@ class AutoRunner:
         On attempt=1 the task.description should already have been replaced
         with brain's retry_prompt.
         """
+        # Log task start
+        if self.session_logger and attempt == 0:
+            try:
+                self.session_logger.log("task_started", {
+                    "task_id": task.id,
+                    "description": task.description,
+                })
+            except Exception:
+                pass
+
         # Retrieve context
         task_context = ""
         if self.context_engine:
@@ -452,12 +470,28 @@ class AutoRunner:
                 output["error"] = str(e)
 
         if output.get("error") and not output.get("raw_response"):
+            if self.session_logger:
+                try:
+                    self.session_logger.log("task_blocked", {
+                        "task_id": task.id,
+                        "reason": output.get("error", "worker error"),
+                    })
+                except Exception:
+                    pass
             return False, tok_ps, ctx_tokens
 
         # Apply file changes (with backup — tracked for checkpoint rollback)
         changed = self._feedback.apply_changes(output.get("file_changes", []))
         self._checkpoint_backups.extend(changed)
         task.files_changed = changed
+
+        # Log file changes
+        if self.session_logger and changed:
+            for fp in changed:
+                try:
+                    self.session_logger.log("file_changed", {"path": fp})
+                except Exception:
+                    pass
 
         # Update indexes silently
         self._update_indexes(changed)
@@ -485,7 +519,26 @@ class AutoRunner:
                     "Worker failed twice: "
                     + "; ".join(str(i) for i in review.get("issues", ["unknown error"]))
                 )
+                if self.session_logger:
+                    try:
+                        self.session_logger.log("task_blocked", {
+                            "task_id": task.id,
+                            "reason": task.block_reason,
+                        })
+                    except Exception:
+                        pass
             return False, tok_ps, ctx_tokens
+
+        # Log completion
+        if self.session_logger:
+            try:
+                self.session_logger.log("task_completed", {
+                    "task_id": task.id,
+                    "score": task.review_score,
+                    "files_changed": changed,
+                })
+            except Exception:
+                pass
 
         return True, tok_ps, ctx_tokens
 
@@ -555,6 +608,23 @@ class AutoRunner:
         )
         plan.checkpoints.append(cp)
         self.save_plan()
+
+        # Persist binary memory state
+        if self.memory:
+            try:
+                self.memory.save_state(self.vector_store, self.graph)
+            except Exception as e:
+                logger.warning(f"Checkpoint: memory save_state failed: {e}")
+
+        # Log checkpoint event
+        if self.session_logger:
+            try:
+                self.session_logger.log("checkpoint", {
+                    "tasks_since_last": tasks_since_last,
+                    "summary_preview": summary_text[:200],
+                })
+            except Exception:
+                pass
 
         # ── Render checkpoint panel ───────────────────────────────────────────
         lines: list[str] = []

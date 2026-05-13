@@ -2,6 +2,11 @@
 
 Local-first autonomous coding agent CLI.
 
+## Documentation
+- [Prerequisites](PREREQUISITES.md) — Before you start (LM Studio, API keys)
+- [User Manual](forge_user_manual.md) — Command reference and workflows
+
+
 ## Install
 
 **One line (Linux/macOS)**
