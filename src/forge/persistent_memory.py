@@ -558,6 +558,7 @@ class PersistentMemory:
 
     def stats(self) -> dict:
         """Return memory statistics for display in forge memory-status."""
+        self._lazy_load()
         cur = self.db.cursor()
         memories_count = cur.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         sessions_count = cur.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]

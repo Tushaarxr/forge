@@ -1,6 +1,6 @@
 # Forge CLI — User Manual
 
-**Version 0.2.1** · Local-first autonomous coding agent
+**Version 0.2.2** · Local-first autonomous coding agent
 
 ---
 
