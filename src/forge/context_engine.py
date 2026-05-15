@@ -26,7 +26,11 @@ class ContextEngine:
         logger.info("ContextEngine initialized with hybrid retrieval")
 
     def get_context(
-        self, task: str, active_file: str | None = None, budget_chars: int = 14000
+        self, 
+        task: str, 
+        active_file: str | None = None, 
+        budget_chars: int = 14000,
+        exclude_files: list[str] | None = None
     ) -> str:
         """Retrieve context for a task using hybrid vector + graph search.
 
@@ -88,7 +92,14 @@ class ContextEngine:
         # ── De-duplicate by chunk_id ───────────────────────────────────────────
         seen_ids: set[str] = set()
         unique_candidates: list[dict[str, Any]] = []
+        exclude_set = set(exclude_files or [])
+
         for cand in all_candidates:
+            chunk = cand["chunk"]
+            file_path = chunk.get("file_path", "")
+            if file_path in exclude_set:
+                continue
+                
             cid = cand["chunk"].get("chunk_id", "")
             if cid not in seen_ids:
                 seen_ids.add(cid)
@@ -207,26 +218,34 @@ class ContextEngine:
         """Calculate recency score.
 
         1.0 for files modified in last 5 minutes, decays linearly to 0 at 1 hour.
+        FIX: Handle edge cases with proper clamping.
         """
         if not self.graph or "file_path" not in chunk:
             return 0.0
 
         try:
             file_path = chunk["file_path"]
-            if file_path in self.graph.graph.nodes():
-                node_data = self.graph.graph.nodes[file_path]
-                mtime = node_data.get("last_modified", 0)
-                if mtime > 0:
-                    age_seconds = time.time() - mtime
-                    five_minutes = 5 * 60
-                    one_hour = 3600
-                    if age_seconds <= five_minutes:
-                        return 1.0
-                    elif age_seconds >= one_hour:
-                        return 0.0
-                    else:
-                        # Linear decay from 1.0 at 5 min to 0.0 at 1 hour
-                        return 1.0 - (age_seconds - five_minutes) / (one_hour - five_minutes)
+            # FIX: Check node exists before accessing
+            if file_path not in self.graph.graph.nodes():
+                return 0.0
+            node_data = self.graph.graph.nodes[file_path]
+            mtime = node_data.get("last_modified", 0)
+            if mtime > 0:
+                age_seconds = time.time() - mtime
+                five_minutes = 5 * 60
+                one_hour = 3600
+                # FIX: Use min/max to clamp and avoid division issues
+                if age_seconds <= five_minutes:
+                    return 1.0
+                elif age_seconds >= one_hour:
+                    return 0.0
+                else:
+                    # Linear decay from 1.0 at 5 min to 0.0 at 1 hour
+                    decay_range = one_hour - five_minutes
+                    if decay_range > 0:
+                        decay = (age_seconds - five_minutes) / decay_range
+                        return max(0.0, min(1.0, 1.0 - decay))  # Clamp to [0, 1]
+                    return 0.0
         except Exception:
             pass
         return 0.0

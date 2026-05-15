@@ -144,7 +144,8 @@ class FeedbackLoop:
                             logger.warning(f"Graph parse failed for {file_path}: {e}")
 
                 # Review output
-                review: dict[str, Any] = {"passed": True, "learnings": [], "score": 7}
+                # FIX: Default to failure instead of passing to avoid masking errors
+                review: dict[str, Any] = {"passed": False, "learnings": [], "score": 0}
                 if brain and output.get("raw_response"):
                     try:
                         review = await brain.review(

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
 if TYPE_CHECKING:
     from .persistent_memory import PersistentMemory
@@ -53,6 +53,8 @@ class AutoTask:
     block_reason: str | None = None
     category: str = "logic"
     estimated_lines: int = 0
+    # FIX 5: dependency tracking — list of task IDs that must be DONE before this runs
+    depends_on: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +67,7 @@ class AutoTask:
             "block_reason": self.block_reason,
             "category": self.category,
             "estimated_lines": self.estimated_lines,
+            "depends_on": self.depends_on,
         }
 
     @classmethod
@@ -79,7 +82,43 @@ class AutoTask:
             block_reason=d.get("block_reason"),
             category=d.get("category", "logic"),
             estimated_lines=d.get("estimated_lines", 0),
+            depends_on=d.get("depends_on", []),
         )
+
+
+class TaskBatch:
+    """Accumulates task results until checkpoint, then sends one review call."""
+
+    def __init__(self, checkpoint_every: int = 5):
+        self.checkpoint_every = checkpoint_every
+        self.pending: list[dict] = []   # tasks waiting for review
+        self.reviewed: list[dict] = []  # tasks that have been reviewed
+
+    def add(self, task_id: int, description: str, 
+            raw_response: str, files_changed: list[str],
+            diffs: dict[str, str]) -> None:
+        """
+        Add a completed task to the pending batch.
+        diffs: {file_path: unified_diff_string}
+        Store diffs not full file contents — much smaller.
+        """
+        self.pending.append({
+            "id": task_id,
+            "task": description,
+            "response_preview": raw_response[:300],  # first 300 chars only
+            "files_changed": files_changed,
+            "diffs": diffs,   # unified diffs, not full files
+        })
+
+    def should_review(self) -> bool:
+        return len(self.pending) >= self.checkpoint_every
+
+    def flush(self) -> list[dict]:
+        """Return pending batch and clear it."""
+        batch = self.pending.copy()
+        self.reviewed.extend(batch)
+        self.pending.clear()
+        return batch
 
 
 @dataclass
@@ -227,6 +266,29 @@ class AutoRunner:
         # Reuse FeedbackLoop's apply/rollback helpers
         from .feedback import FeedbackLoop
         self._feedback = FeedbackLoop()
+        self.api_calls_used = 0
+
+    def _generate_diff(self, file_path: str, backup_path: str) -> str:
+        """
+        Generate a compact unified diff between backup and current file.
+        Returns empty string if no backup exists.
+        Caps at 100 lines of diff — enough for review, not bloated.
+        """
+        import difflib
+        try:
+            with open(backup_path, encoding="utf-8") as f:
+                original = f.readlines()
+            with open(file_path, encoding="utf-8") as f:
+                current = f.readlines()
+            diff = list(difflib.unified_diff(
+                original, current,
+                fromfile=f"a/{file_path}",
+                tofile=f"b/{file_path}",
+                n=2  # 2 lines context (not 3) — saves tokens
+            ))
+            return "".join(diff[:100])  # hard cap at 100 diff lines
+        except Exception:
+            return ""
 
     # ── Plan I/O ──────────────────────────────────────────────────────────────
 
@@ -253,6 +315,9 @@ class AutoRunner:
             data = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
             plan = AutoPlan.from_dict(data)
             if plan.status == PlanStatus.IN_PROGRESS:
+                if not plan.tasks:
+                    logger.warning("Existing plan.json has 0 tasks. Ignoring.")
+                    return None
                 return plan
         except Exception as e:
             logger.warning(f"Could not load plan.json: {e}")
@@ -271,13 +336,25 @@ class AutoRunner:
     async def create_plan(
         self,
         goal: str,
-        from_plan_file: str | None = None,
+        plan_file: str | None = None,
     ) -> AutoPlan:
         """Create a fresh plan from goal or load from a file path."""
-        if from_plan_file:
-            data = json.loads(Path(from_plan_file).read_text(encoding="utf-8"))
-            plan = AutoPlan.from_dict(data)
-            plan.goal = goal or plan.goal
+        if plan_file:
+            from .plan_parser import parse_plan
+            plan, is_raw = parse_plan(plan_file, goal=goal)
+            
+            if is_raw and self.brain:
+                # Convert raw list of descriptions into structured tasks
+                raw_text = "\n".join([t.description for t in plan.tasks])
+                project_summary = {}
+                if self.graph:
+                    project_summary = self.graph.get_summary()
+                
+                refined_tasks_data = await self.brain.refine_text_plan(raw_text, goal, project_summary)
+                plan.tasks = [AutoTask.from_dict(t) for t in refined_tasks_data]
+            
+            plan.created_at = datetime.now().isoformat()
+            plan.status = PlanStatus.IN_PROGRESS
             self.plan = plan
             self.save_plan()
             return plan
@@ -287,6 +364,8 @@ class AutoRunner:
             project_summary = self.graph.get_summary()
 
         tasks_raw = await self.brain.plan_full_project(goal, project_summary)
+        if not tasks_raw:
+            raise ValueError("Master Brain returned zero tasks for this goal. Check your prompt or model status.")
 
         plan = AutoPlan(
             goal=goal,
@@ -300,6 +379,7 @@ class AutoRunner:
                 active_file=t.get("active_file"),
                 category=t.get("category", "logic"),
                 estimated_lines=t.get("estimated_lines", 0),
+                depends_on=t.get("depends_on", []),
             )
             for i, t in enumerate(tasks_raw)
         ]
@@ -309,14 +389,15 @@ class AutoRunner:
 
     # ── Main autonomous loop ──────────────────────────────────────────────────
 
-    async def run(self) -> AsyncIterator[RunEvent]:
+    async def run(self, on_stream: Callable[[str], None] | None = None) -> AsyncIterator[RunEvent]:
         """Async generator yielding RunEvent objects throughout execution.
 
         Drives:
           - task pickup (pending → in_progress)
-          - execute with one auto-retry
-          - silent review
-          - checkpoint pause every N tasks
+          - execute locally
+          - accumulate in TaskBatch
+          - silent batch review every N tasks + retry
+          - checkpoint pause
           - hard stop at max_tasks
         """
         assert self.plan is not None, "Call create_plan() before run()"
@@ -329,43 +410,23 @@ class AutoRunner:
         total_executed = 0
 
         pending = plan.pending_tasks()
+        batch = TaskBatch(checkpoint_every=self.checkpoint_every)
 
         for task in pending:
             if total_executed >= self.max_tasks:
                 break
 
-            # ── Mark in_progress ────────────────────────────────────────────
-            task.status = TaskStatus.IN_PROGRESS
-            self.save_plan()
-            t_start = time.monotonic()
-            yield RunEvent(type=EventType.TASK_STARTED, task=task, plan=plan)
-
-            # ── Execute (with one retry) ─────────────────────────────────────
-            success, tok_ps, ctx_tok = await self._execute_task(task, attempt=0)
-
-            if not success:
-                yield RunEvent(
-                    type=EventType.TASK_RETRYING,
-                    task=task,
-                    plan=plan,
-                    message="First attempt failed — auto-retrying with improved prompt",
-                )
-                success, tok_ps, ctx_tok = await self._execute_task(task, attempt=1)
-
-            elapsed = time.monotonic() - t_start
-
-            if success:
-                task.status = TaskStatus.DONE
-            else:
+            # FIX 5: Skip tasks whose dependencies are still blocked/pending
+            runnable, dep_reason = self._is_runnable(task)
+            if not runnable:
                 task.status = TaskStatus.BLOCKED
+                task.block_reason = f"Dependency not met: {dep_reason}"
                 self.save_plan()
                 yield RunEvent(
                     type=EventType.TASK_BLOCKED,
                     task=task,
                     plan=plan,
-                    elapsed=elapsed,
-                    tokens_per_second=tok_ps,
-                    ctx_tokens=ctx_tok,
+                    message=task.block_reason,
                 )
                 tasks_since_checkpoint += 1
                 total_executed += 1
@@ -376,13 +437,29 @@ class AutoRunner:
                         if ev.type == EventType.CHECKPOINT_STOP:
                             stop = True
                     if stop:
-                        yield RunEvent(type=EventType.RUN_ABORTED, plan=plan,
-                                       message="User stopped at checkpoint")
+                        yield RunEvent(type=EventType.RUN_ABORTED, plan=plan, message="User stopped at checkpoint")
                         return
                     tasks_since_checkpoint = 0
                 continue
 
+            # Mark in_progress
+            task.status = TaskStatus.IN_PROGRESS
             self.save_plan()
+            t_start = time.monotonic()
+            yield RunEvent(type=EventType.TASK_STARTED, task=task, plan=plan)
+
+            # Execute via worker
+            output_dict, changed, tok_ps, ctx_tok = await self._execute_task(task, stream_callback=on_stream)
+            elapsed = time.monotonic() - t_start
+
+            diffs = {}
+            for fp in changed:
+                backup = fp + ".forge_backup"
+                diffs[fp] = self._generate_diff(fp, backup)
+                
+            batch.add(task.id, task.description, output_dict.get("raw_response", ""), changed, diffs)
+            task.status = TaskStatus.DONE
+
             yield RunEvent(
                 type=EventType.TASK_DONE,
                 task=task,
@@ -391,28 +468,55 @@ class AutoRunner:
                 tokens_per_second=tok_ps,
                 ctx_tokens=ctx_tok,
             )
+            
+            if self.session_logger:
+                try:
+                    self.session_logger.log("task_completed", {"task_id": task.id})
+                except Exception:
+                    pass
+            self.save_plan()
 
             tasks_since_checkpoint += 1
             total_executed += 1
 
-            # ── Checkpoint? ─────────────────────────────────────────────────
-            if tasks_since_checkpoint >= self.checkpoint_every:
+            if batch.should_review():
+                pending_batch = batch.flush()
+                if self.brain:
+                    self.api_calls_used += 1
+                    batch_result = await self.brain.batch_review(pending_batch, plan.goal)
+                    async for ev in self._handle_batch_result(batch_result, pending_batch, plan, on_stream):
+                        yield ev
+                else:
+                    batch_result = None
+                    for item in pending_batch:
+                        t = next((t for t in plan.tasks if t.id == item["id"]), None)
+                        if t: t.status = TaskStatus.DONE
+                    self.save_plan()
+
                 stop = False
-                async for ev in self._do_checkpoint(tasks_since_checkpoint):
+                async for ev in self._do_checkpoint(tasks_since_checkpoint, batch_result=batch_result):
                     yield ev
                     if ev.type == EventType.CHECKPOINT_STOP:
                         stop = True
                 if stop:
-                    yield RunEvent(type=EventType.RUN_ABORTED, plan=plan,
-                                   message="User stopped at checkpoint")
+                    yield RunEvent(type=EventType.RUN_ABORTED, plan=plan, message="User stopped at checkpoint")
                     return
                 tasks_since_checkpoint = 0
 
-        # ── Final state ───────────────────────────────────────────────────────
+        # Flush remaining tasks
+        remaining = batch.flush()
+        if remaining and self.brain:
+            self.api_calls_used += 1
+            batch_result = await self.brain.batch_review(remaining, plan.goal)
+            async for ev in self._handle_batch_result(batch_result, remaining, plan, on_stream):
+                yield ev
+
         plan.status = PlanStatus.DONE if plan.blocked_count == 0 else PlanStatus.IN_PROGRESS
         self.save_plan()
 
-        # Final checkpoint / summary
+        if self.brain:
+            self.api_calls_used += 1
+
         async for ev in self._do_checkpoint(tasks_since_checkpoint, is_final=True):
             yield ev
             if ev.type == EventType.CHECKPOINT_STOP:
@@ -422,18 +526,106 @@ class AutoRunner:
 
     # ── Single task execution ─────────────────────────────────────────────────
 
+    async def _handle_batch_result(self, batch_result: dict, batch: list[dict], plan: AutoPlan, on_stream: Callable[[str], None] | None = None) -> AsyncIterator[RunEvent]:
+        retry_ids = set(batch_result.get("retry_tasks", []))
+        
+        for item in batch:
+            task = next((t for t in plan.tasks if t.id == item["id"]), None)
+            if not task: continue
+            
+            task_result = next(
+                (t for t in batch_result.get("tasks", []) if t.get("id") == item["id"]), 
+                None
+            )
+            
+            if task_result is None or task_result.get("ok"):
+                task.status = TaskStatus.DONE
+                self.save_plan()
+                continue
+            
+            if item["id"] in retry_ids:
+                yield RunEvent(
+                    type=EventType.TASK_RETRYING,
+                    task=task,
+                    plan=plan,
+                    message=task_result.get("issue", "fix the output")
+                )
+                
+                issue = task_result.get("issue", "fix the output")
+                retry_prompt = (
+                    f"Fix this specific issue in your previous output:\n"
+                    f"ISSUE: {issue}\n\n"
+                    f"Original task: {item['task']}\n\n"
+                    f"Previous output (broken):\n{item['response_preview']}"
+                )
+                
+                t_start = time.monotonic()
+                # Execute retry directly with worker
+                retry_output = {"raw_response": "", "file_changes": [], "patch_changes": []}
+                tok_ps = 0.0
+                if self.worker:
+                    try:
+                        retry_output = await self.worker.execute(
+                            task=retry_prompt, 
+                            context="",  # no context re-fetch
+                            active_file=task.active_file,
+                            stream_callback=on_stream
+                        )
+                        tok_ps = retry_output.get("tokens_per_second", 0.0)
+                    except Exception as e:
+                        logger.error(f"Worker retry failed for task {task.id}: {e}")
+
+                changed = self._feedback.apply_changes(retry_output.get("file_changes", []))
+                for _patch in retry_output.get("patch_changes", []):
+                    _fp = _patch.get("file_path", "")
+                    if self.worker and self.worker.apply_patch(_fp, _patch.get("find", ""), _patch.get("replace", "")):
+                        if _fp not in changed:
+                            changed.append(_fp)
+
+                self._checkpoint_backups.extend(changed)
+                task.files_changed.extend([f for f in changed if f not in task.files_changed])
+                
+                self_review = {"passed": True}
+                if self.worker and retry_output.get("raw_response"):
+                    try:
+                        self_review = await self.worker.self_review(
+                            task.description,
+                            retry_output.get("raw_response", "")
+                        )
+                    except Exception:
+                        pass
+                
+                if self_review.get("passed", True):
+                    task.status = TaskStatus.DONE
+                else:
+                    task.status = TaskStatus.BLOCKED
+                    task.block_reason = issue
+                
+                self.save_plan()
+                elapsed = time.monotonic() - t_start
+                yield RunEvent(
+                    type=EventType.TASK_DONE if task.status == TaskStatus.DONE else EventType.TASK_BLOCKED,
+                    task=task,
+                    plan=plan,
+                    elapsed=elapsed,
+                    tokens_per_second=tok_ps,
+                    ctx_tokens=0,
+                )
+            else:
+                task.status = TaskStatus.DONE
+                self.save_plan()
+
+        if self.memory:
+            for learning in batch_result.get("learnings", []):
+                self.memory.remember(learning, category="decision", source="auto")
+
     async def _execute_task(
         self,
         task: AutoTask,
-        attempt: int = 0,
-    ) -> tuple[bool, float, int]:
-        """Execute one task. Returns (success, tokens_per_second, ctx_tokens).
-
-        On attempt=1 the task.description should already have been replaced
-        with brain's retry_prompt.
-        """
-        # Log task start
-        if self.session_logger and attempt == 0:
+        stream_callback: Callable[[str], None] | None = None
+    ) -> tuple[dict, list[str], float, int]:
+        """Execute one task locally. Returns (output_dict, changed_files, tok_ps, ctx_tok)."""
+        if self.session_logger:
             try:
                 self.session_logger.log("task_started", {
                     "task_id": task.id,
@@ -442,50 +634,68 @@ class AutoRunner:
             except Exception:
                 pass
 
-        # Retrieve context
+        direct_file_context = ""
+        if task.active_file and os.path.exists(task.active_file):
+            try:
+                with open(task.active_file, "r", encoding="utf-8") as _f:
+                    _current = _f.read()
+                char_budget = 8000
+                if len(_current) <= char_budget:
+                    direct_file_context = "\nCURRENT STATE OF " + task.active_file + ":\n```\n" + _current + "\n```\n"
+                else:
+                    direct_file_context = "\nCURRENT STATE OF " + task.active_file + " (last " + str(char_budget) + " chars):\n```\n..." + _current[-char_budget:] + "\n```\n"
+            except Exception as _fe:
+                logger.warning("Could not read active_file for context: %s", _fe)
+
         task_context = ""
         if self.context_engine:
             try:
+                # If we are already sending the full content of the active_file,
+                # tell the context engine to exclude it from retrieval to save tokens.
                 task_context = self.context_engine.get_context(
-                    task.description, task.active_file
+                    task.description, 
+                    active_file=task.active_file,
+                    exclude_files=[task.active_file] if direct_file_context else None
                 )
             except Exception as e:
                 logger.warning(f"Context retrieval failed for task {task.id}: {e}")
 
-        ctx_tokens = len(task_context) // 4
+        full_context = direct_file_context + task_context
+        ctx_tokens = len(full_context) // 4
 
-        # Execute via local worker
-        output: dict[str, Any] = {"raw_response": "", "file_changes": []}
+        worker_task_prompt = task.description
+
+        output: dict[str, Any] = {"raw_response": "", "file_changes": [], "patch_changes": []}
         tok_ps = 0.0
         if self.worker:
             try:
                 output = await self.worker.execute(
-                    task=task.description,
-                    context=task_context,
+                    task=worker_task_prompt,
+                    context=full_context,
                     active_file=task.active_file,
+                    stream_callback=stream_callback
                 )
                 tok_ps = output.get("tokens_per_second", 0.0)
             except Exception as e:
-                logger.error(f"Worker execution failed (task {task.id}, attempt {attempt}): {e}")
+                logger.error(f"Worker execution failed (task {task.id}): {e}")
                 output["error"] = str(e)
 
-        if output.get("error") and not output.get("raw_response"):
-            if self.session_logger:
-                try:
-                    self.session_logger.log("task_blocked", {
-                        "task_id": task.id,
-                        "reason": output.get("error", "worker error"),
-                    })
-                except Exception:
-                    pass
-            return False, tok_ps, ctx_tokens
-
-        # Apply file changes (with backup — tracked for checkpoint rollback)
         changed = self._feedback.apply_changes(output.get("file_changes", []))
+
+        if self.worker:
+            for _patch in output.get("patch_changes", []):
+                _fp = _patch.get("file_path", "")
+                _ok = self.worker.apply_patch(
+                    _fp, _patch.get("find", ""), _patch.get("replace", "")
+                )
+                if _ok and _fp not in changed:
+                    changed.append(_fp)
+                elif not _ok:
+                    logger.warning("Patch mismatch on %s - full file context on retry", _fp)
+
         self._checkpoint_backups.extend(changed)
         task.files_changed = changed
 
-        # Log file changes
         if self.session_logger and changed:
             for fp in changed:
                 try:
@@ -493,54 +703,28 @@ class AutoRunner:
                 except Exception:
                     pass
 
-        # Update indexes silently
         self._update_indexes(changed)
 
-        # Review output silently
-        review: dict[str, Any] = {"passed": True, "score": 7, "learnings": []}
-        if self.brain and output.get("raw_response"):
-            try:
-                review = await self.brain.review(
-                    task=task.description,
-                    output=output.get("raw_response", ""),
-                    changed_files=changed,
-                )
-            except Exception as e:
-                logger.error(f"Review failed for task {task.id}: {e}")
+        return output, changed, tok_ps, ctx_tokens
 
-        task.review_score = review.get("score", 0)
 
-        if not review.get("passed", True):
-            if attempt == 0:
-                # Replace description with brain's improved retry prompt for next attempt
-                task.description = review.get("retry_prompt") or task.description
-            else:
-                task.block_reason = (
-                    "Worker failed twice: "
-                    + "; ".join(str(i) for i in review.get("issues", ["unknown error"]))
-                )
-                if self.session_logger:
-                    try:
-                        self.session_logger.log("task_blocked", {
-                            "task_id": task.id,
-                            "reason": task.block_reason,
-                        })
-                    except Exception:
-                        pass
-            return False, tok_ps, ctx_tokens
 
-        # Log completion
-        if self.session_logger:
-            try:
-                self.session_logger.log("task_completed", {
-                    "task_id": task.id,
-                    "score": task.review_score,
-                    "files_changed": changed,
-                })
-            except Exception:
-                pass
 
-        return True, tok_ps, ctx_tokens
+    def _is_runnable(self, task) -> tuple[bool, str]:
+        """FIX 5: Check if all task dependencies have status DONE.
+
+        Returns:
+            (True, "") if runnable, or (False, reason_string) if blocked.
+        """
+        for dep_id in getattr(task, "depends_on", []):
+            dep = next((t for t in self.plan.tasks if t.id == dep_id), None)
+            if dep is None:
+                continue  # unknown dep id - skip
+            if dep.status == TaskStatus.BLOCKED:
+                return False, f"depends on blocked task {dep_id}: {dep.description[:60]}"
+            if dep.status in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+                return False, f"depends on incomplete task {dep_id}"
+        return True, ""
 
     def _update_indexes(self, changed_files: list[str]) -> None:
         """Silently update vector store and project graph for changed files."""
@@ -562,6 +746,7 @@ class AutoRunner:
         self,
         tasks_since_last: int,
         is_final: bool = False,
+        batch_result: dict | None = None,
     ) -> AsyncIterator[RunEvent]:
         """Render checkpoint panel and handle user input.
 
@@ -587,17 +772,20 @@ class AutoRunner:
 
         # Build a summary via brain
         summary_text = ""
-        if self.brain:
+        if is_final and self.brain:
             try:
                 recent_changes: list[dict] = []
                 for t in plan.tasks:
                     if t.status == TaskStatus.DONE and t.files_changed:
                         recent_changes.append({"task": t.description, "files": t.files_changed})
+                self.api_calls_used += 1
                 summary_result = await self.brain.summarise(recent_changes, plan.to_dict())
                 summary_text = summary_result.get("summary", "")
             except Exception as e:
                 logger.warning(f"Checkpoint summary failed: {e}")
                 summary_text = "(summary unavailable)"
+        elif batch_result:
+            summary_text = batch_result.get("batch_summary", "")
 
         # Record checkpoint
         cp = CheckpointRecord(
@@ -629,15 +817,25 @@ class AutoRunner:
         # ── Render checkpoint panel ───────────────────────────────────────────
         lines: list[str] = []
         header = "✅ FINAL SUMMARY" if is_final else f"⏸  CHECKPOINT — {tasks_since_last} tasks completed"
-        lines.append(f"[bold cyan]{header}[/bold cyan]\n")
+        lines.append(f"[bold cyan]{header}[/bold cyan]")
+        lines.append(f"[dim]API Calls used: {self.api_calls_used}[/dim]\n")
 
         # Recent task results
-        recent_done = [t for t in plan.tasks if t.status == TaskStatus.DONE][-tasks_since_last:]
-        if recent_done:
-            lines.append("[bold green]Completed:[/bold green]")
-            for t in recent_done:
-                files_str = ", ".join(t.files_changed[:3]) or "—"
-                lines.append(f"  [green]✓[/green] {t.description[:55]:<55} → [dim]{files_str}[/dim]")
+        if batch_result:
+            lines.append("[bold green]Batch Review Results:[/bold green]")
+            for tr in batch_result.get("tasks", []):
+                icon = "[green]✓[/green]" if tr.get("ok") else "[red]✗[/red]"
+                task_desc = next((t.description for t in plan.tasks if t.id == tr.get("id")), f"Task {tr.get('id')}")
+                lines.append(f"  {icon} {task_desc[:55]:<55} → score: {tr.get('score', 0)}")
+                if not tr.get("ok") and tr.get("issue"):
+                    lines.append(f"     [red]Issue: {tr.get('issue')}[/red]")
+        else:
+            recent_done = [t for t in plan.tasks if t.status == TaskStatus.DONE][-tasks_since_last:]
+            if recent_done:
+                lines.append("[bold green]Completed:[/bold green]")
+                for t in recent_done:
+                    files_str = ", ".join(t.files_changed[:3]) or "—"
+                    lines.append(f"  [green]✓[/green] {t.description[:55]:<55} → [dim]{files_str}[/dim]")
 
         # Blocked tasks
         if blocked:

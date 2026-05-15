@@ -5,7 +5,23 @@ Local-first autonomous coding agent CLI.
 ## Documentation
 - [Prerequisites](PREREQUISITES.md) — Before you start (LM Studio, API keys)
 - [User Manual](forge_user_manual.md) — Command reference and workflows
+- [Changelog](CHANGELOG.md) — Version history and release notes
 
+## Features
+
+### Performance
+- **Query Caching**: LRU cache (128 entries) for repeated semantic searches
+- **HTTP Connection Pooling**: Reused connections in Brain and Worker for reduced latency
+- **Parallel Indexing**: ThreadPoolExecutor for indexing large files (>1KB) in parallel
+
+### Reliability
+- **Custom Exceptions**: Specific error types (`BrainError`, `WorkerError`, etc.) for better debugging
+- **Retry with Backoff**: Exponential backoff for transient network failures
+- **Graceful Degradation**: Components work independently when optional dependencies fail
+
+### Configuration
+- **Pydantic Validation**: Type-safe configuration with validation
+- **Environment Validation**: Clear error messages for missing required settings
 
 ## Install
 

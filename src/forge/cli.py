@@ -67,7 +67,7 @@ def _lm_studio_error(url: str) -> None:
 
 
 @click.group()
-@click.version_option(version="0.2.2", message="forge-coder %(version)s")
+@click.version_option(version="0.2.4", message="forge-coder %(version)s")
 def app() -> None:
     """Forge — Local coding agent with Gemini planning and LM Studio execution."""
     pass
@@ -133,9 +133,10 @@ def setup_command(reset: bool = False, key: bool = False) -> None:
 
     if not key:
         console.print(Panel("""[bold cyan]╭──────────────────────────────────────────╮
-│  🔨 forge — Local Coding Agent v0.2.2   │
+│  🔨 forge — Local Coding Agent v0.2.3   │
 │  First-time setup wizard                 │
 ╰──────────────────────────────────────────╯[/bold cyan]""", border_style="cyan"))
+
 
     # LM Studio Check
     if not key:
@@ -169,34 +170,80 @@ def setup_command(reset: bool = False, key: bool = False) -> None:
 
     # Gemini API Key Check
     api_key = config.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
+    
+    use_existing = False
     if api_key and not key:
-        console.print(f"\\n[green]✓ Gemini API key found ({api_key[:4]}...)[/green]")
-        if Confirm.ask("Test this key?", default=True):
-            pass # Skipping real test for brevity, assuming valid
-    else:
+        console.print(f"\n[green]✓ Current Gemini API key: {api_key[:4]}...{api_key[-4:]}[/green]")
+        use_existing = Confirm.ask("Use this existing key?", default=True)
+
+    if not use_existing or key:
         console.print("\n[bold]Gemini API Key[/bold]")
         console.print("Get your free Gemini API key at: https://aistudio.google.com")
         console.print("  1. Sign in with Google")
         console.print("  2. Click 'Get API key' → 'Create API key'")
         console.print("  3. Copy the key (starts with AIza...)")
-        api_key = Prompt.ask("Paste your Gemini API key", password=True)
+        api_key = Prompt.ask("Paste your Gemini API key").strip()
         config["gemini_api_key"] = api_key
 
     if not key:
-        console.print("\n[bold]Which Gemini model for planning? (free tier recommended)[/bold]")
-        console.print("  [1] gemini-2.0-flash     — Fast, free, 1500 req/day")
-        console.print("  [2] gemini-2.5-flash     — Smarter planning, free tier")
-        console.print("  [3] gemini-2.5-pro       — Best quality, limited free quota")
-        console.print("  [4] Enter custom model name")
+        console.print("\n[bold]API Call Budget[/bold]")
+        console.print("Gemini Free Tier allows 15 RPM and 1,500 RPD.")
+        console.print("How often should forge send batches for review?")
+        console.print("  [1] Minimal  (every 10 tasks) - lowest API usage")
+        console.print("  [2] Balanced (every 5 tasks)  - default")
+        console.print("  [3] Maximum  (every 2 tasks)  - highest quality, highest API usage")
+        console.print("  [4] Custom   (enter number of tasks)")
+        budget_choice = Prompt.ask("Choice", default="2")
+        if budget_choice == "1":
+            config["checkpoint_every"] = 10
+        elif budget_choice == "3":
+            config["checkpoint_every"] = 2
+        elif budget_choice == "4":
+            config["checkpoint_every"] = int(Prompt.ask("Tasks per batch", default="5"))
+        else:
+            config["checkpoint_every"] = 5
+        
+        est_calls = (20 // config["checkpoint_every"]) + 1
+        console.print(f"[cyan]Quota Estimator: A standard 20-task run will use ~{est_calls} API calls.[/cyan]")
+
+    if not key:
+        console.print("\n[bold]Master Brain: Planning & Review[/bold]")
+        console.print("Free-tier tip: Use multiple models as fallbacks to maximize your quota.")
+        console.print("  [1] Flash Trio (Recommended) — 2.5-flash + 2.5-flash-lite + 3.1-flash-lite")
+        console.print("  [2] gemini-2.5-flash only")
+        console.print("  [3] gemini-2.5-pro (Requires higher quota/billing)")
         mod_choice = Prompt.ask("Choice", default="1")
-        if mod_choice == "1": config["master_model"] = "gemini-2.0-flash"
-        elif mod_choice == "2": config["master_model"] = "gemini-2.5-flash"
-        elif mod_choice == "3": config["master_model"] = "gemini-2.5-pro"
-        else: config["master_model"] = Prompt.ask("Enter model name", default="gemini-2.0-flash")
+        if mod_choice == "1":
+            config["master_model"] = "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-3.1-flash-lite"
+        elif mod_choice == "2":
+            config["master_model"] = "gemini-2.5-flash"
+        elif mod_choice == "3":
+            config["master_model"] = "gemini-2.5-pro"
+        else:
+            config["master_model"] = Prompt.ask("Enter model name(s), comma-separated", default="gemini-2.5-flash")
+
+    # Test connectivity
+    if Confirm.ask("Test API connectivity and quota now?", default=True):
+        from .brain import Brain
+        os.environ["GEMINI_API_KEY"] = api_key
+        os.environ["MASTER_MODEL"] = config.get("master_model", "gemini-2.5-flash")
+        brain = Brain()
+        with console.status("[cyan]Testing connection...[/cyan]"):
+            import asyncio
+            try:
+                success, msg = asyncio.run(brain.test_connection())
+                if success:
+                    console.print(f"[green]✅ {msg}[/green]")
+                else:
+                    console.print(f"[red]❌ {msg}[/red]")
+                    if "429" in msg:
+                        console.print("[yellow]Tip: You've hit your burst limit. Wait a minute or check your dashboard.[/yellow]")
+            except Exception as te:
+                console.print(f"[red]❌ Connection test failed: {te}[/red]")
 
     config["lm_studio_url"] = "http://localhost:1234"
     config["setup_complete"] = True
-    config["version"] = "0.2.2"
+    config["version"] = "0.2.3"
     
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     console.print(f"\n[green]✓ Global config saved to {config_path}[/green]")
@@ -263,6 +310,22 @@ def init_command(verbose: bool) -> None:
             return
 
     forge_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Task 0: Health Check ─────────────────────────────────────────────────
+    from .brain import Brain
+    brain = Brain()
+    with console.status("[cyan]Verifying Master Brain connectivity...[/cyan]"):
+        import asyncio
+        try:
+            success, msg = asyncio.run(brain.test_connection())
+            if not success:
+                console.print(f"[bold yellow]⚠️  Master Brain Warning:[/bold yellow] {msg}")
+                if "429" in msg:
+                    console.print("[dim]You may be hitting rate limits. forge auto planning might fail.[/dim]")
+            elif verbose:
+                console.print(f"[green]✓ Master Brain: {msg}[/green]")
+        except Exception:
+            pass # Don't block init on network issues, but warn in auto
 
     vector_store = VectorStore()
     project_graph = ProjectGraph()
@@ -888,17 +951,17 @@ def rollback_command() -> None:
     help="Skip the initial confirmation prompt.",
 )
 @click.option(
-    "--from-plan",
+    "--plan-file",
     default=None,
-    type=click.Path(exists=True, dir_okay=False),
-    help="Load a pre-generated plan JSON instead of re-planning.",
+    type=str,
+    help="Load a pre-generated plan (JSON, plain text file, '-' for stdin, or raw string).",
 )
 def auto_command(
     goal: str | None,
     checkpoint_every: int,
     max_tasks: int,
     yes: bool,
-    from_plan: str | None,
+    plan_file: str | None,
 ) -> None:
     """Autonomous end-to-end build mode — describe what you want, forge builds it.
 
@@ -910,7 +973,7 @@ def auto_command(
       forge auto "build a FastAPI todo app with SQLite and JWT auth"
       forge auto --checkpoint-every 3 --max-tasks 30 --yes "build a CLI calculator"
       forge auto                        # resume an in-progress plan
-      forge auto --from-plan plan.json  # load a saved plan
+      forge auto --plan-file plan.txt   # load a saved plan
     """
     from .auto_runner import (
         AutoRunner, EventType, PlanStatus, TaskStatus,
@@ -993,7 +1056,7 @@ def auto_command(
 
         # ── Resume check ──────────────────────────────────────────────────────
         existing_plan = AutoRunner.load_existing_plan()
-        if existing_plan and not from_plan:
+        if existing_plan and not plan_file:
             console.print(
                 f"\n[bold yellow]📋 Found incomplete plan:[/bold yellow] "
                 f"{existing_plan.goal[:70]}\n"
@@ -1014,7 +1077,7 @@ def auto_command(
         # ── Planning phase (if not resuming) ─────────────────────────────────
         if runner.plan is None:
             _actual_goal = goal
-            if not _actual_goal and not from_plan:
+            if not _actual_goal and not plan_file:
                 console.print(
                     "[red]❌ No goal provided and no in-progress plan found.[/red]\n"
                     "[dim]Usage: forge auto \"<goal>\" or run forge auto to resume[/dim]"
@@ -1022,11 +1085,14 @@ def auto_command(
                 return
 
             console.print(f"\n[bold blue]🧠 Planning:[/bold blue] {_actual_goal or '(from file)'}")
-            console.print("[dim]Master brain generating full project roadmap...[/dim]")
+            if plan_file:
+                console.print("[dim]Refining your plan with Master Brain...[/dim]")
+            else:
+                console.print("[dim]Master brain generating full project roadmap...[/dim]")
 
             plan = await runner.create_plan(
                 goal=_actual_goal or "",
-                from_plan_file=from_plan,
+                plan_file=plan_file,
             )
 
             if not plan.tasks:
@@ -1073,6 +1139,7 @@ def auto_command(
             "active_ctx": 0,
             "last_done": [],            # last N completed task descriptions
             "retrying": False,
+            "stream_text": "",
         }
 
         def _build_panel() -> Panel:
@@ -1120,6 +1187,10 @@ def auto_command(
                 if tok_str:
                     lines.append(f"    {tok_str}")
 
+                stream = state.get("stream_text", "")
+                if stream:
+                    lines.append(f"    [dim cyan]{stream}[/dim cyan]")
+
             lines.append("")
 
             # Next task
@@ -1161,8 +1232,15 @@ def auto_command(
             _task_start_mono = [time.monotonic()]
             tick_task = _asyncio.ensure_future(_tick_elapsed())
 
+            def _on_stream(chunk: str) -> None:
+                st = state.get("stream_text", "")
+                st = (st + chunk).replace('\n', ' ↵ ')
+                if len(st) > 75:
+                    st = "..." + st[-72:]
+                state["stream_text"] = st
+
             try:
-                async for event in runner.run():
+                async for event in runner.run(on_stream=_on_stream):
                     etype = event.type
 
                     if etype == EventType.TASK_STARTED:
@@ -1171,10 +1249,12 @@ def auto_command(
                         state["active_elapsed"] = 0.0
                         state["active_tok_ps"] = 0.0
                         state["active_ctx"] = 0
+                        state["stream_text"] = ""
                         _task_start_mono[0] = time.monotonic()
 
                     elif etype == EventType.TASK_RETRYING:
                         state["retrying"] = True
+                        state["stream_text"] = ""
 
                     elif etype in (EventType.TASK_DONE, EventType.TASK_BLOCKED):
                         t = event.task
@@ -1183,6 +1263,7 @@ def auto_command(
                         state["active_elapsed"] = event.elapsed
                         state["active_tok_ps"] = event.tokens_per_second
                         state["active_ctx"] = event.ctx_tokens
+                        state["stream_text"] = ""
                         if etype == EventType.TASK_DONE:
                             state["last_done"].append(t.description[:62])
 
@@ -1207,6 +1288,9 @@ def auto_command(
                     elif etype == EventType.RUN_COMPLETE:
                         live.stop()
                         break
+
+                    if not live.is_started:
+                        live.start()
 
                     live.update(_build_panel())
 

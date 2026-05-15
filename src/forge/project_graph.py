@@ -278,13 +278,16 @@ class ProjectGraph:
         }
 
     def _is_file_node(self, node: str) -> bool:
-        return self.graph.nodes[node].get("type") == "file"
+        # FIX: Add existence check to prevent KeyError
+        return node in self.graph and self.graph.nodes[node].get("type") == "file"
 
     def _is_function_node(self, node: str) -> bool:
-        return self.graph.nodes[node].get("type") == "function"
+        # FIX: Add existence check to prevent KeyError
+        return node in self.graph and self.graph.nodes[node].get("type") == "function"
 
     def _is_class_node(self, node: str) -> bool:
-        return self.graph.nodes[node].get("type") == "class"
+        # FIX: Add existence check to prevent KeyError
+        return node in self.graph and self.graph.nodes[node].get("type") == "class"
 
     def save(self) -> None:
         """Save graph to file using node-link data format."""

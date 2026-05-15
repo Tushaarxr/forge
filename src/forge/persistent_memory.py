@@ -69,6 +69,8 @@ class PersistentMemory:
         self.index: faiss.IndexFlatIP | None = None     # lazy
         self.meta: dict[str, dict] = {}                  # chunk_id → record
         self.graph: nx.DiGraph | None = None             # lazy
+        # FIX: Reverse lookup for O(1) FAISS ID to chunk_id mapping
+        self._faiss_idx_to_chunk: dict[int, str] = {}
 
     # ── Model ─────────────────────────────────────────────────────────────────
 
@@ -228,6 +230,7 @@ class PersistentMemory:
         vec = self._embed(text)
 
         idx = self._ensure_index()
+        current_idx = idx.ntotal
         idx.add(vec.reshape(1, -1))
 
         text_gz = self._compress(text)
@@ -241,8 +244,11 @@ class PersistentMemory:
             "text_gz": text_gz,
             "indexed_at": now,
             "access_count": 0,
-            "faiss_idx": idx.ntotal - 1,
+            "faiss_idx": current_idx,
         }
+
+        # FIX: Update reverse lookup
+        self._faiss_idx_to_chunk[current_idx] = chunk_id
 
         self._save_index()
         self._save_meta()
@@ -287,12 +293,8 @@ class PersistentMemory:
             if faiss_id < 0:
                 continue
 
-            # Find chunk_id by faiss_idx
-            chunk_id = None
-            for cid, meta in self.meta.items():
-                if meta.get("faiss_idx") == int(faiss_id):
-                    chunk_id = cid
-                    break
+            # FIX: O(1) lookup using reverse index instead of O(n) iteration
+            chunk_id = self._faiss_idx_to_chunk.get(int(faiss_id))
 
             if chunk_id is None:
                 continue
@@ -370,6 +372,8 @@ class PersistentMemory:
         self.index = faiss.IndexFlatIP(EMBED_DIM)
         model = self._get_model()
         new_meta: dict[str, dict] = {}
+        # FIX: Rebuild reverse lookup
+        self._faiss_idx_to_chunk.clear()
 
         for chunk_id, record in self.meta.items():
             text_gz = record.get("text_gz", "")
@@ -381,12 +385,15 @@ class PersistentMemory:
             norm = np.linalg.norm(vec)
             if norm > 0:
                 vec /= norm
+            current_idx = self.index.ntotal
             self.index.add(vec.reshape(1, -1))
-            record["faiss_idx"] = self.index.ntotal - 1
+            record["faiss_idx"] = current_idx
             new_meta[chunk_id] = record
+            # FIX: Update reverse lookup
+            self._faiss_idx_to_chunk[current_idx] = chunk_id
 
         self.meta = new_meta
-        self._save_index()
+        self._save_index()  # FIX: Actually save the rebuilt index
         self._save_meta()
 
     def decay_scores(self) -> None:
