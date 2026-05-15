@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forge-coder"
-version = "0.2.2"
+version = "0.2.5"
 description = "Local-first autonomous coding agent CLI"
 authors = [{name = "Developer", email = "dev@example.com"}]
 readme = "README.md"
@@ -25,6 +25,8 @@ dependencies = [
     "numpy>=1.26.0",
     "prompt_toolkit>=3.0.0",
     "msgpack>=1.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
 ]
 
 [project.scripts]

@@ -30,8 +30,15 @@ def _make_runner(tmp_path: Path, checkpoint_every: int = 5, max_tasks: int = 50)
         {"id": 3, "description": "Add routes", "active_file": "routes.py",
          "category": "route", "estimated_lines": 60},
     ])
-    brain.review = AsyncMock(return_value={
-        "passed": True, "score": 8, "issues": [], "retry_prompt": "", "learnings": []
+    brain.batch_review = AsyncMock(return_value={
+        "tasks": [
+            {"id": 1, "ok": True, "score": 8, "issue": ""},
+            {"id": 2, "ok": True, "score": 8, "issue": ""},
+            {"id": 3, "ok": True, "score": 8, "issue": ""},
+        ],
+        "retry_tasks": [],
+        "batch_summary": "Built scaffold and models",
+        "learnings": []
     })
     brain.summarise = AsyncMock(return_value={
         "summary": "Built scaffold and models", "key_decisions": [], "next_suggested": [], "risk_flags": []
@@ -45,6 +52,7 @@ def _make_runner(tmp_path: Path, checkpoint_every: int = 5, max_tasks: int = 50)
         "elapsed_seconds": 1.0,
         "tokens_per_second": 100.0,
     })
+    worker.self_review = AsyncMock(return_value={"passed": True, "score": 8})
 
     feedback = MagicMock()
     feedback.apply_changes = MagicMock(return_value=[])
@@ -209,13 +217,16 @@ class TestAutonomousLoop:
     async def test_failed_review_marks_blocked_after_two_attempts(self, tmp_path):
         runner = _make_runner(tmp_path, checkpoint_every=10)
 
-        # Make review always fail
-        runner.brain.review = AsyncMock(return_value={
-            "passed": False, "score": 2,
-            "issues": ["import error"], "retry_prompt": "try again", "learnings": []
+        runner.brain.batch_review = AsyncMock(return_value={
+            "tasks": [{"id": 1, "ok": False, "score": 2, "issue": "import error"}],
+            "retry_tasks": [1],
+            "batch_summary": "",
+            "learnings": []
         })
+        runner.worker.self_review = AsyncMock(return_value={"passed": False})
 
         plan = await runner.create_plan(goal="build something broken")
+        plan.tasks = [plan.tasks[0]]
 
         events = []
         async for event in runner.run():
@@ -223,7 +234,7 @@ class TestAutonomousLoop:
 
         from forge.auto_runner import EventType, TaskStatus
         blocked_events = [e for e in events if e.type == EventType.TASK_BLOCKED]
-        assert len(blocked_events) == 3
+        assert len(blocked_events) == 1
 
         for task in runner.plan.tasks:
             assert task.status == TaskStatus.BLOCKED
@@ -248,19 +259,16 @@ class TestAutonomousLoop:
     async def test_retry_uses_improved_prompt(self, tmp_path):
         runner = _make_runner(tmp_path, checkpoint_every=10)
 
-        call_count = 0
-
-        async def _failing_then_passing(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return {"passed": False, "score": 3, "issues": ["bad code"],
-                        "retry_prompt": "IMPROVED: do it better", "learnings": []}
-            return {"passed": True, "score": 8, "issues": [], "retry_prompt": "", "learnings": []}
-
-        runner.brain.review = AsyncMock(side_effect=_failing_then_passing)
+        runner.brain.batch_review = AsyncMock(return_value={
+            "tasks": [{"id": 1, "ok": False, "score": 3, "issue": "bad code"}],
+            "retry_tasks": [1],
+            "batch_summary": "",
+            "learnings": []
+        })
+        runner.worker.self_review = AsyncMock(return_value={"passed": True})
 
         plan = await runner.create_plan(goal="build something")
+        plan.tasks = [plan.tasks[0]]
 
         from forge.auto_runner import EventType
         events = []
@@ -368,3 +376,61 @@ class TestCheckpointRollback:
         for t in plan.tasks:
             assert t.status == TaskStatus.PENDING
             assert t.files_changed == []
+
+# -- FIX 6: task.description must never be mutated by retry_prompt -------------
+
+class TestRetryDoesNotMutateDescription:
+    @pytest.mark.asyncio
+    async def test_retry_does_not_mutate_task_description(self, tmp_path):
+        from forge.auto_runner import AutoRunner, EventType
+        from unittest.mock import AsyncMock, MagicMock
+        import forge.auto_runner as ar_module
+        
+        runner = _make_runner(tmp_path, checkpoint_every=10)
+
+        runner.brain.batch_review = AsyncMock(return_value={
+            "tasks": [{"id": 1, "ok": False, "score": 2, "issue": "loop body is empty"}],
+            "retry_tasks": [1],
+            "batch_summary": "",
+            "learnings": []
+        })
+        runner.worker.self_review = AsyncMock(return_value={"passed": True})
+
+        plan = await runner.create_plan(goal="build something")
+        original_descriptions = [t.description for t in plan.tasks]
+
+        async for _ in runner.run():
+            pass
+
+        for task, orig in zip(plan.tasks, original_descriptions):
+            assert task.description == orig, (
+                f"Task {task.id} description was mutated: expected '{orig}', got '{task.description}'"
+            )
+
+# -- API Call Counter ----------------------------------------------------------
+
+class TestApiCallCounter:
+    @pytest.mark.asyncio
+    async def test_api_calls_used_tracks_batch_review(self, tmp_path):
+        runner = _make_runner(tmp_path, checkpoint_every=2)
+        plan = await runner.create_plan(goal="test api calls")
+        
+        # 3 tasks total, checkpoint_every=2
+        # batch 1 (tasks 1, 2) -> batch_review
+        # batch 2 (task 3) -> batch_review
+        # Total API calls = 2
+        
+        runner.brain.batch_review = AsyncMock(return_value={
+            "tasks": [{"id": 1, "ok": True, "score": 8, "issue": ""},
+                      {"id": 2, "ok": True, "score": 8, "issue": ""},
+                      {"id": 3, "ok": True, "score": 8, "issue": ""}],
+            "retry_tasks": [],
+            "batch_summary": "",
+            "learnings": []
+        })
+        
+        async for _ in runner.run():
+            pass
+            
+        assert runner.api_calls_used == 3
+        assert runner.brain.batch_review.call_count == 2
